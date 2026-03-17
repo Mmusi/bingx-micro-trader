@@ -1,0 +1,14 @@
+{
+  "name": "bingx-micro-trader",
+  "version": "1.0.0",
+  "description": "BingX Perpetual Futures Micro Trading Bot",
+  "scripts": {
+    "dev":      "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"cyan,magenta\" \"npm run backend\" \"npm run frontend\"",
+    "start":    "concurrently --names \"BACKEND,FRONTEND\" --prefix-colors \"cyan,magenta\" \"npm run backend\" \"npm run frontend\"",
+    "backend":  "npm --prefix backend run dev",
+    "frontend": "npm --prefix frontend start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
