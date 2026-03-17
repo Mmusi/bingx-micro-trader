@@ -40,7 +40,8 @@ let running       = false;
 let paused        = false;
 let loopTimer     = null;
 let statusCache   = {};
-let engineToggles = { ...cfg.ENGINES };
+const ENGINE_DEFAULTS_INIT = { RANGE: true, BREAKOUT: true, LIQUIDITY: true, LIQUIDATION: true, VOLATILITY: true, SCALP: true };
+let engineToggles = { ...ENGINE_DEFAULTS_INIT, ...(cfg.ENGINES || {}) };
 
 const analysisCache = {};
 
@@ -85,7 +86,8 @@ function getActiveTrades()    { return Array.from(activeTrades.values()); }
 function getStatus()          { return statusCache; }
 function getAnalysisCache()   { return analysisCache; }
 function setEngineToggle(name, val) { engineToggles[name] = val; }
-function getEngineToggles()   { return { ...engineToggles }; }
+const ENGINE_DEFAULTS = { RANGE: true, BREAKOUT: true, LIQUIDITY: true, LIQUIDATION: true, VOLATILITY: true, SCALP: true };
+function getEngineToggles() { return { ...ENGINE_DEFAULTS, ...engineToggles }; }
 
 // ── Main cycle ────────────────────────────────────────────────
 async function runCycle() {
@@ -131,7 +133,58 @@ async function runCycle() {
     // ── Purge stale signals ────────────────────────────────────
     signalQueue.purgeStale();
 
-    // ── Analyse each viable pair ───────────────────────────────
+    // ── PHASE 1: Analyse ALL enabled pairs for intelligence cache ──
+    // This runs regardless of balance — ensures Volatility Predictor,
+    // Liquidity Heatmap, Liquidation Map and AI Score panels always
+    // show data for every pair the user has enabled.
+    for (const pair of pairs) {
+      try {
+        const candles1h = await marketData.getCandles(pair, '1h', 100);
+        if (!candles1h || candles1h.length < 30) continue;
+
+        const ticker = await marketData.getTicker(pair);
+        const price  = parseFloat(ticker?.lastPrice || ticker?.price || 0);
+        if (!price) continue;
+
+        const closes  = candles1h.map(c => c.close);
+        const volumes = candles1h.map(c => c.volume);
+
+        const volPrediction = volatilityPredictor.predictExpansion(candles1h);
+        const liquidityData = engineToggles.LIQUIDITY
+          ? await liquidityHeatmapEngine.analyseLiquidity(pair, price)
+          : { wallDistance: null, nearestWall: null };
+        const liqMap = engineToggles.LIQUIDATION
+          ? liquidationMapEngine.calcLiquidationMap(candles1h, price)
+          : null;
+        const range   = rangeDetector.detectRange(candles1h);
+        const funding = fundingRates.getBias(pair);
+
+        let bbWidth = 0;
+        if (candles1h.length >= 20) {
+          const slice = closes.slice(-20);
+          const mean  = slice.reduce((a,b)=>a+b,0)/20;
+          const sd    = Math.sqrt(slice.reduce((s,v)=>s+(v-mean)**2,0)/20);
+          bbWidth     = (sd*4)/mean;
+        }
+
+        analysisCache[pair] = {
+          price, regime: volPrediction.regime,
+          expansionProbability: volPrediction.expansionProbability,
+          bbWidth: volPrediction.bbWidth,
+          atrRatio: volPrediction.atrRatio,
+          liquidity: liquidityData,
+          liqMap,
+          range: { support: range.support, resistance: range.resistance, inRange: range.inRange },
+          funding,
+          updatedAt: Date.now(),
+        };
+      } catch (err) {
+        log.debug(`[Strategy] Analysis cache error ${pair}: ${err.message}`);
+      }
+    }
+
+    // ── PHASE 2: Signal generation — only for viable pairs ────
+    // Balance routing only blocks TRADING, never market analysis.
     for (const pair of viablePairs) {
       if ([...activeTrades.values()].find(t => t.symbol === pair)) continue;
 
@@ -147,40 +200,19 @@ async function runCycle() {
       const avgVol  = volumes.slice(-20).reduce((a,b)=>a+b,0) / 20;
       const lastVol = volumes[volumes.length - 1];
 
-      // Run all intelligence engines (unchanged)
+      // Re-use already-computed cache values for this pair
+      const cachedAnalysis = analysisCache[pair] || {};
       const volPrediction  = volatilityPredictor.predictExpansion(candles1h);
-      const liquidityData  = engineToggles.LIQUIDITY
-        ? await liquidityHeatmapEngine.analyseLiquidity(pair, price)
-        : { wallDistance: null, nearestWall: null };
-      const liqMap         = engineToggles.LIQUIDATION
-        ? liquidationMapEngine.calcLiquidationMap(candles1h, price)
-        : null;
+      const liquidityData  = cachedAnalysis.liquidity || { wallDistance: null, nearestWall: null };
+      const liqMap         = cachedAnalysis.liqMap || null;
       const range          = rangeDetector.detectRange(candles1h);
       const funding        = fundingRates.getBias(pair);
 
-      // ATR & BB for filters
-      let atr = 0, bbWidth = 0;
+      let atr = 0, bbWidth = cachedAnalysis.bbWidth || 0;
       if (candles1h.length >= 20) {
-        const slice = closes.slice(-20);
-        const mean  = slice.reduce((a,b)=>a+b,0)/20;
-        const sd    = Math.sqrt(slice.reduce((s,v)=>s+(v-mean)**2,0)/20);
-        bbWidth     = (sd*4)/mean;
-        atr         = Math.abs(closes[closes.length-1] - closes[closes.length-2]);
+        atr = Math.abs(closes[closes.length-1] - closes[closes.length-2]);
       }
       const volatility = price > 0 ? atr / price : 0;
-
-      // Cache per-pair analysis (unchanged)
-      analysisCache[pair] = {
-        price, regime: volPrediction.regime,
-        expansionProbability: volPrediction.expansionProbability,
-        bbWidth: volPrediction.bbWidth,
-        atrRatio: volPrediction.atrRatio,
-        liquidity: liquidityData,
-        liqMap,
-        range: { support: range.support, resistance: range.resistance, inRange: range.inRange },
-        funding,
-        updatedAt: Date.now(),
-      };
 
       const regime = volPrediction.regime || 'UNKNOWN';
       let signal = null;
@@ -208,14 +240,12 @@ async function runCycle() {
       }
 
       // ── NEW: Scalping engine (runs if no strategic signal found) ──
-      // This supplements the existing engines — it never overrides them.
       if (!signal && engineToggles.SCALP !== false) {
         try {
           const candles5m = await marketData.getCandles(pair, '5m', 60);
           if (candles5m && candles5m.length >= 30) {
             const scalpResult = scalpEngine.detectScalpSignal(candles5m);
             if (scalpResult.signal) {
-              // NEW: MTF alignment check — only trade with 1H trend
               const mtfCheck = mtfEngine.checkMTFAlignment(scalpResult.signal, candles1h);
               if (mtfCheck.aligned) {
                 signal = {
