@@ -1,4 +1,5 @@
 // components/ChartPanel.tsx — Chart panel with summary bar
+// ADDITION: Summary bar now shows SCALPING mode vs RANGE SCAN mode
 
 import React, { useState } from 'react';
 import TradingChart from '../charts/TradingChart';
@@ -24,6 +25,11 @@ export default function ChartPanel({ priceMap, botStatus, onSymbolChange }: Prop
   const paused        = botStatus?.paused  ?? false;
   const summary       = buildSummary(botStatus, symbol, activeTrades);
 
+  // ── NEW: count scalp signals in queue ─────────────────────
+  const queue = botStatus?.queue || [];
+  const scalpCount = queue.filter((s: any) => s.source === 'SCALP').length;
+  const strategicCount = queue.filter((s: any) => s.source !== 'SCALP').length;
+
   return (
     <div className="panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
 
@@ -32,6 +38,7 @@ export default function ChartPanel({ priceMap, botStatus, onSymbolChange }: Prop
         <div style={{ display: 'flex', gap: 4 }}>
           {PAIRS.map(p => {
             const hasTrade = (botStatus?.activeTrades || []).some((t: any) => t.symbol === p);
+            const isScalping = (botStatus?.activeTrades || []).some((t: any) => t.symbol === p && t.source === 'SCALP');
             return (
               <button key={p} onClick={() => changeSymbol(p)} style={{
                 background: symbol === p ? '#0a1e2e' : 'transparent',
@@ -41,7 +48,15 @@ export default function ChartPanel({ priceMap, botStatus, onSymbolChange }: Prop
                 fontFamily: "'Space Mono',monospace", fontSize: 10, borderRadius: 2, position: 'relative',
               }}>
                 {p.replace('-USDT', '')}
-                {hasTrade && <span style={{ position: 'absolute', top: -3, right: -3, width: 6, height: 6, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 6px #00ff88' }} />}
+                {hasTrade && (
+                  <span style={{
+                    position: 'absolute', top: -3, right: -3,
+                    width: 6, height: 6, borderRadius: '50%',
+                    // ── NEW: cyan dot for scalp trades, green for others ──
+                    background: isScalping ? '#00f5ff' : '#00ff88',
+                    boxShadow: `0 0 6px ${isScalping ? '#00f5ff' : '#00ff88'}`,
+                  }} />
+                )}
               </button>
             );
           })}
@@ -66,15 +81,33 @@ export default function ChartPanel({ priceMap, botStatus, onSymbolChange }: Prop
         </div>
       </div>
 
-      {/* Summary bar */}
+      {/* Summary bar — UPDATED to show scalp mode */}
       <div style={{ padding: '6px 14px', background: '#071520', borderBottom: '1px solid #0d2a3d', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, minHeight: 30 }}>
         <span style={{ fontFamily: "'Orbitron',sans-serif", fontSize: 8, letterSpacing: 2, color: paused ? '#ffd700' : running ? '#00ff88' : '#4a7a99', border: `1px solid ${paused ? '#ffd70044' : running ? '#00ff8844' : '#0d2a3d'}`, padding: '2px 8px', borderRadius: 2 }}>
           {paused ? '⚠ PAUSED' : running ? '● TRADING' : '○ STOPPED'}
         </span>
         <span style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 11, color: summary.color, flex: 1 }}>{summary.text}</span>
-        {(botStatus?.queue || []).length > 0 && (
+
+        {/* ── NEW: mode indicator ── */}
+        {running && (
+          <span style={{
+            fontFamily: "'Orbitron',sans-serif", fontSize: 8, letterSpacing: 1,
+            color: scalpCount > 0 ? '#00f5ff' : '#4a7a99',
+            background: scalpCount > 0 ? '#00f5ff0a' : 'transparent',
+            border: `1px solid ${scalpCount > 0 ? '#00f5ff33' : '#0d2a3d'}`,
+            padding: '2px 8px', borderRadius: 2,
+          }}>
+            {scalpCount > 0
+              ? `⚡ SCALPING · ${scalpCount} signal${scalpCount > 1 ? 's' : ''}`
+              : strategicCount > 0
+              ? `📡 RANGE SCAN · ${strategicCount} queued`
+              : '🔍 SCANNING'}
+          </span>
+        )}
+
+        {queue.length > 0 && (
           <span style={{ fontFamily: "'Share Tech Mono',monospace", fontSize: 10, color: '#ffd700' }}>
-            {botStatus.queue.length} signal{botStatus.queue.length > 1 ? 's' : ''} queued
+            {queue.length} signal{queue.length > 1 ? 's' : ''} queued
           </span>
         )}
       </div>
@@ -100,10 +133,19 @@ function buildSummary(botStatus: any, symbol: string, activeTrades: any[]) {
       ? (((t.currentPrice || t.entryPrice) - t.stopPrice) / t.entryPrice * 100).toFixed(2)
       : ((t.stopPrice - (t.currentPrice || t.entryPrice)) / t.entryPrice * 100).toFixed(2);
     const c = Number(pnl) >= 0 ? '#00ff88' : '#ff3366';
-    return { text: `${t.direction === 'LONG' ? '▲' : '▼'} ${symbol} — Entry $${t.entryPrice?.toFixed(2)} · PnL ${Number(pnl) >= 0 ? '+' : ''}${pnl}% · ${dStop}% above stop $${t.stopPrice?.toFixed(2)} · AI ${t.aiScore || '?'}% · Trailing active`, color: c };
+    // ── NEW: show scalp vs other in trade summary ──
+    const typeLabel = t.source === 'SCALP' ? '⚡' : t.direction === 'LONG' ? '▲' : '▼';
+    const htfInfo   = t.htfTrend ? ` · HTF:${t.htfTrend}` : '';
+    return { text: `${typeLabel} ${symbol} — Entry $${t.entryPrice?.toFixed(2)} · PnL ${Number(pnl) >= 0 ? '+' : ''}${pnl}% · ${dStop}% above stop $${t.stopPrice?.toFixed(2)} · AI ${t.aiScore || '?'}%${htfInfo} · Trailing active`, color: c };
   }
   const q = (botStatus.queue || []).filter((s: any) => s.symbol === symbol);
-  if (q.length > 0) return { text: `${q[0].direction} signal queued — strength ${q[0].strength}% via ${q[0].source}. Waiting for a slot.`, color: '#ffd700' };
+  if (q.length > 0) {
+    const isScalp = q[0].source === 'SCALP';
+    return {
+      text: `${isScalp ? '⚡ SCALP' : q[0].direction} signal queued — strength ${q[0].strength}% via ${q[0].source}${q[0].htfTrend ? ' HTF:' + q[0].htfTrend : ''}. Waiting for a slot.`,
+      color: isScalp ? '#00f5ff' : '#ffd700',
+    };
+  }
 
   const analysis = botStatus?.analysisCache?.[symbol];
   const regime   = analysis?.regime || 'scanning';

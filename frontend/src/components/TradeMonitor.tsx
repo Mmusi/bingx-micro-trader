@@ -1,4 +1,5 @@
 // components/TradeMonitor.tsx — Active trades with trailing stop display
+// ADDITIONS: Trade type badges (SCALP/RANGE/BREAKOUT/LIQUIDITY), HTF trend display
 
 import React from 'react';
 import { tradeAPI } from '../services/api';
@@ -15,12 +16,22 @@ interface Trade {
   quantity: number;
   source: string;
   openedAt: number;
+  htfTrend?: string;
 }
 
 interface Props {
   trades: Trade[];
   onClose: (id: string) => void;
 }
+
+// ── NEW: Source badge config ──────────────────────────────────
+const SOURCE_BADGE: Record<string, { label: string; color: string }> = {
+  SCALP:         { label: '⚡ SCALP',    color: '#00f5ff' },
+  BREAKOUT:      { label: '🚀 BREAKOUT', color: '#ffd700' },
+  LIQUIDITY_TRAP:{ label: '🪤 LIQ TRAP', color: '#bf5fff' },
+  RANGE:         { label: '📊 RANGE',    color: '#8ec8e8' },
+  MANUAL_TEST:   { label: '🧪 TEST',     color: '#4a7a99' },
+};
 
 export default function TradeMonitor({ trades, onClose }: Props) {
   const handleClose = async (id: string) => {
@@ -66,10 +77,12 @@ function TradeRow({ trade, onClose }: { trade: Trade; onClose: (id: string) => v
   const pnlColor = pnl >= 0 ? '#00ff88' : '#ff3366';
   const age      = Math.floor((Date.now() - trade.openedAt) / 60000);
 
-  // Progress bar: how far from entry to stop (or peak)
   const stopDist = trade.direction === 'LONG'
     ? ((trade.currentPrice - trade.stopPrice) / trade.entryPrice) * 100
     : ((trade.stopPrice - trade.currentPrice) / trade.entryPrice) * 100;
+
+  // ── NEW: source badge ─────────────────────────────────────
+  const badge = SOURCE_BADGE[trade.source] || { label: trade.source, color: '#4a7a99' };
 
   return (
     <div style={{
@@ -79,19 +92,43 @@ function TradeRow({ trade, onClose }: { trade: Trade; onClose: (id: string) => v
       border: `1px solid ${pnl >= 0 ? '#00ff8833' : '#ff336633'}`,
       borderRadius: 2,
       position: 'relative',
+      // NEW: left accent colour by source type
+      borderLeft: `3px solid ${badge.color}66`,
     }}>
-      {/* Direction badge + symbol */}
+      {/* Direction badge + symbol + NEW type badge */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <span className={`tag tag-${trade.direction.toLowerCase()}`}>{trade.direction}</span>
         <span style={{
           fontFamily: "'Orbitron', sans-serif",
-          fontSize: 12,
-          fontWeight: 700,
-          color: '#e0f4ff',
-          letterSpacing: 1,
+          fontSize: 12, fontWeight: 700,
+          color: '#e0f4ff', letterSpacing: 1,
         }}>{trade.symbol}</span>
+
+        {/* ── NEW: Source type badge ── */}
+        <span style={{
+          fontSize: 8,
+          fontFamily: "'Orbitron', sans-serif",
+          color: badge.color,
+          background: `${badge.color}18`,
+          border: `1px solid ${badge.color}55`,
+          padding: '1px 6px',
+          borderRadius: 2,
+          letterSpacing: 1,
+        }}>{badge.label}</span>
+
+        {/* ── NEW: HTF trend indicator for scalps ── */}
+        {trade.htfTrend && trade.htfTrend !== 'NEUTRAL' && (
+          <span style={{
+            fontSize: 8,
+            fontFamily: "'Share Tech Mono', monospace",
+            color: trade.htfTrend === 'LONG' ? '#00ff88' : '#ff3366',
+          }}>
+            1H:{trade.htfTrend}
+          </span>
+        )}
+
         <span style={{ fontSize: 9, color: '#4a7a99', marginLeft: 'auto' }}>
-          {age}m ago | {trade.source}
+          {age}m ago
         </span>
       </div>
 
@@ -106,8 +143,7 @@ function TradeRow({ trade, onClose }: { trade: Trade; onClose: (id: string) => v
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{
           fontFamily: "'Orbitron', sans-serif",
-          fontSize: 16,
-          fontWeight: 900,
+          fontSize: 16, fontWeight: 900,
           color: pnlColor,
           textShadow: `0 0 15px ${pnlColor}`,
         }}>
